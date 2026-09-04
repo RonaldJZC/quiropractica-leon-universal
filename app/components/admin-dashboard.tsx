@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
 import QRCode from 'qrcode';
 import {
   Activity,
+  Camera,
   CalendarDays,
   Check,
   CheckCircle2,
@@ -19,13 +20,26 @@ import {
   LogOut,
   MoreHorizontal,
   Plus,
-  Printer,
   QrCode,
   Search,
+  Scale,
   Sparkles,
+  Trash2,
   UserPlus,
   Users,
+  WalletCards,
 } from 'lucide-react';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -69,11 +83,12 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { CLINIC_QR_CODE } from '@/lib/clinic';
+import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
 
 type ScheduleItem = {
   id: string;
+  patientId: string;
   time: string;
   name: string;
   status: string;
@@ -87,6 +102,7 @@ type Patient = {
   phone: string | null;
   used: number;
   total: number;
+  qrValue?: string | null;
 };
 
 type DashboardData = {
@@ -96,14 +112,14 @@ type DashboardData = {
   demo?: boolean;
 };
 
-type View = 'today' | 'patients' | 'calendar' | 'supplements' | 'qr';
+type View = 'scanner' | 'today' | 'patients' | 'calendar' | 'supplements';
 
 const navItems: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
+  { id: 'scanner', label: 'Escanear QR', icon: Camera },
   { id: 'today', label: 'Hoy', icon: LayoutDashboard },
   { id: 'patients', label: 'Pacientes', icon: Users },
   { id: 'calendar', label: 'Agenda', icon: CalendarDays },
   { id: 'supplements', label: 'Suplementos', icon: Leaf },
-  { id: 'qr', label: 'Código QR', icon: QrCode },
 ];
 
 const statusLabels: Record<string, { label: string; className: string }> = {
@@ -116,7 +132,7 @@ const statusLabels: Record<string, { label: string; className: string }> = {
 };
 
 export function AdminDashboard({ user }: { user: { name: string; email: string } }) {
-  const [view, setView] = useState<View>('today');
+  const [view, setView] = useState<View>('scanner');
   const [data, setData] = useState<DashboardData | null>(null);
   const [newPatientOpen, setNewPatientOpen] = useState(false);
   const [patientOpen, setPatientOpen] = useState<Patient | null>(null);
@@ -151,8 +167,8 @@ export function AdminDashboard({ user }: { user: { name: string; email: string }
               <Sparkles className="size-5" />
             </span>
             <div>
-              <p className="text-[0.68rem] font-semibold uppercase tracking-[0.16em] text-sidebar-foreground/55">Centro</p>
-              <p className="font-bold tracking-tight">Quiropráctico</p>
+              <p className="text-[0.68rem] font-semibold uppercase tracking-[0.16em] text-sidebar-foreground/55">Quiropráctica</p>
+              <p className="font-bold tracking-tight">León Universal</p>
             </div>
           </div>
         </SidebarHeader>
@@ -235,6 +251,7 @@ export function AdminDashboard({ user }: { user: { name: string; email: string }
                   Estás viendo datos de ejemplo. El primer paciente real que registres quedará guardado en la base de datos.
                 </div>
               )}
+              {view === 'scanner' && <QrScannerView onRegistered={() => void refresh()} />}
               {view === 'today' && (
                 <TodayView
                   data={data}
@@ -276,7 +293,6 @@ export function AdminDashboard({ user }: { user: { name: string; email: string }
               {view === 'supplements' && (
                 <SupplementsView patients={data.patients} onNew={() => setSupplementOpen(true)} />
               )}
-              {view === 'qr' && <QrPoster />}
             </>
           )}
         </div>
@@ -287,13 +303,217 @@ export function AdminDashboard({ user }: { user: { name: string; email: string }
         onOpenChange={setNewPatientOpen}
         onSaved={() => void refresh()}
       />
-      <PatientDialog patient={patientOpen} onOpenChange={(open) => !open && setPatientOpen(null)} />
+      <PatientDialog
+        key={patientOpen?.id ?? 'closed'}
+        patient={patientOpen}
+        onOpenChange={(open) => !open && setPatientOpen(null)}
+        onDeleted={() => { setPatientOpen(null); void refresh(); }}
+        onSaved={() => void refresh()}
+      />
       <SupplementDialog
         patients={data?.patients ?? []}
         open={supplementOpen}
         onOpenChange={setSupplementOpen}
       />
     </SidebarProvider>
+  );
+}
+
+type CheckInResult = {
+  patientId: string;
+  name: string;
+  checkedInAt: string;
+  appointmentTime: string;
+  used: number;
+  total: number;
+  alreadyRegistered?: boolean;
+  walkIn?: boolean;
+  demo?: boolean;
+};
+
+function QrScannerView({ onRegistered }: { onRegistered: () => void }) {
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [processing, setProcessing] = useState(false);
+  const [error, setError] = useState('');
+  const [result, setResult] = useState<CheckInResult | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const busyRef = useRef(false);
+
+  useEffect(() => {
+    const context = document.modelContext;
+    if (!context?.registerTool) return;
+    const lifecycle = new AbortController();
+    void Promise.resolve(
+      context.registerTool(
+        {
+          name: 'start_patient_qr_scan',
+          title: 'Abrir lector de pacientes',
+          description: 'Abre la cámara del panel para escanear la tarjeta QR que presenta un paciente.',
+          inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+          annotations: { readOnlyHint: true, untrustedContentHint: false },
+          async execute() {
+            setResult(null);
+            setError('');
+            setCameraOpen(true);
+            containerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            return { status: 'scanner_opened' };
+          },
+        },
+        { signal: lifecycle.signal },
+      ),
+    ).catch(() => undefined);
+    return () => lifecycle.abort();
+  }, []);
+
+  const registerQr = useCallback(async (qrValue: string) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setProcessing(true);
+    setError('');
+    try {
+      const response = await fetch('/api/admin/check-in', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ qrValue }),
+      });
+      const body = (await response.json()) as CheckInResult & { error?: string };
+      if (!response.ok) throw new Error(body.error || 'No se pudo registrar la llegada.');
+      setResult(body);
+      setCameraOpen(false);
+      onRegistered();
+    } catch (requestError) {
+      setError((requestError as Error).message);
+    } finally {
+      setProcessing(false);
+      busyRef.current = false;
+    }
+  }, [onRegistered]);
+
+  useEffect(() => {
+    if (!cameraOpen || !videoRef.current) return;
+    let scanner: { start: () => Promise<void>; stop: () => void; destroy: () => void } | null = null;
+    let cancelled = false;
+
+    void import('qr-scanner').then(async ({ default: QrScanner }) => {
+      if (cancelled || !videoRef.current) return;
+      scanner = new QrScanner(
+        videoRef.current,
+        (scanResult) => void registerQr(scanResult.data),
+        {
+          preferredCamera: 'environment',
+          highlightScanRegion: true,
+          highlightCodeOutline: true,
+          maxScansPerSecond: 4,
+        },
+      );
+      try {
+        await scanner.start();
+      } catch {
+        setError('No se pudo abrir la cámara. Revisa el permiso del navegador.');
+        setCameraOpen(false);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      scanner?.stop();
+      scanner?.destroy();
+    };
+  }, [cameraOpen, registerQr]);
+
+  function reset() {
+    setResult(null);
+    setError('');
+    setCameraOpen(false);
+  }
+
+  return (
+    <div ref={containerRef} className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
+      <Card className="overflow-hidden rounded-[2rem] border-0 bg-slate-950 text-white shadow-xl">
+        <CardContent className="relative grid min-h-[620px] place-items-center p-6 text-center sm:p-9">
+          {result ? (
+            <div className="w-full max-w-lg">
+              <span className={`mx-auto grid size-24 place-items-center rounded-full ${result.alreadyRegistered ? 'bg-amber-300 text-amber-950' : 'bg-emerald-300 text-emerald-950'}`}>
+                {result.alreadyRegistered ? <Clock3 className="size-11" /> : <Check className="size-12 stroke-[3]" />}
+              </span>
+              <p className={`mt-8 text-sm font-bold uppercase tracking-[0.18em] ${result.alreadyRegistered ? 'text-amber-300' : 'text-emerald-300'}`}>
+                {result.alreadyRegistered ? 'Asistencia ya registrada' : 'Llegada registrada'}
+              </p>
+              <h2 className="mt-3 text-4xl font-black tracking-tight sm:text-5xl">{result.name}</h2>
+              <div className="mx-auto mt-7 grid max-w-md grid-cols-2 gap-3 text-left">
+                <div className="rounded-2xl bg-white/10 p-4">
+                  <p className="text-xs font-bold uppercase tracking-wider text-white/55">Hora</p>
+                  <p className="mt-2 text-xl font-black">{result.appointmentTime}</p>
+                </div>
+                <div className="rounded-2xl bg-white/10 p-4">
+                  <p className="text-xs font-bold uppercase tracking-wider text-white/55">Sesiones</p>
+                  <p className="mt-2 text-xl font-black">{result.used} de {result.total}</p>
+                </div>
+              </div>
+              {result.walkIn && <p className="mx-auto mt-4 max-w-md rounded-xl bg-cyan-300/15 px-4 py-3 text-sm text-cyan-100">No tenía cita para hoy; se añadió como llegada sin cita.</p>}
+              {result.demo && <p className="mt-4 text-sm text-white/55">Resultado de demostración. No modifica la agenda.</p>}
+              <Button onClick={reset} className="mt-8 h-14 rounded-2xl bg-white px-7 text-base font-black text-slate-950 hover:bg-white/90">
+                <QrCode className="size-5" /> Escanear otro paciente
+              </Button>
+            </div>
+          ) : cameraOpen ? (
+            <div className="w-full max-w-lg">
+              <p className="text-sm font-bold uppercase tracking-[0.18em] text-cyan-300">Cámara activa</p>
+              <h2 className="mt-3 text-3xl font-black">Apunta al QR del paciente</h2>
+              <div className="relative mx-auto mt-7 aspect-[4/5] max-h-[430px] overflow-hidden rounded-[1.75rem] border-2 border-cyan-300/50 bg-black">
+                <video ref={videoRef} className="h-full w-full object-cover" muted playsInline />
+                {processing && <div className="absolute inset-0 grid place-items-center bg-slate-950/75"><LoaderCircle className="size-10 animate-spin text-cyan-300" /></div>}
+              </div>
+              <Button variant="outline" onClick={() => setCameraOpen(false)} className="mt-5 h-12 rounded-xl border-white/20 bg-transparent text-white hover:bg-white/10 hover:text-white">
+                Cancelar
+              </Button>
+            </div>
+          ) : (
+            <div>
+              <span className="mx-auto grid size-24 place-items-center rounded-[2rem] bg-cyan-300 text-slate-950">
+                <Camera className="size-11" />
+              </span>
+              <p className="mt-8 text-sm font-bold uppercase tracking-[0.18em] text-cyan-300">Control de asistencia</p>
+              <h2 className="mt-3 text-4xl font-black tracking-tight">Escanea la tarjeta del paciente</h2>
+              <p className="mx-auto mt-4 max-w-md text-base leading-7 text-white/65">
+                El paciente solo muestra el QR recibido por WhatsApp o impreso. No necesita abrir ninguna aplicación.
+              </p>
+              <Button onClick={() => { setError(''); setCameraOpen(true); }} className="mt-8 h-14 rounded-2xl bg-cyan-300 px-7 text-base font-black text-slate-950 hover:bg-cyan-200">
+                <Camera className="size-5" /> Abrir cámara
+              </Button>
+            </div>
+          )}
+          {error && <p role="alert" className="absolute bottom-7 mx-6 rounded-xl bg-red-500/15 px-4 py-3 text-sm font-semibold text-red-100">{error}</p>}
+        </CardContent>
+      </Card>
+
+      <div className="space-y-5">
+        <Card className="rounded-3xl border-0 shadow-sm">
+          <CardContent className="p-6">
+            <p className="text-sm font-bold text-cyan-800">Cómo funciona</p>
+            <ol className="mt-5 space-y-5">
+              {['El paciente muestra su tarjeta.', 'Escaneas el QR con este lector.', 'La llegada aparece en la agenda.'].map((label, index) => (
+                <li key={label} className="flex gap-3 text-sm leading-6">
+                  <span className="grid size-7 shrink-0 place-items-center rounded-full bg-slate-950 text-xs font-black text-white">{index + 1}</span>
+                  <span>{label}</span>
+                </li>
+              ))}
+            </ol>
+          </CardContent>
+        </Card>
+        <Card className="rounded-3xl border-0 bg-cyan-50 shadow-sm">
+          <CardContent className="p-6">
+            <QrCode className="size-7 text-cyan-800" />
+            <h3 className="mt-4 font-extrabold">Probar sin cámara</h3>
+            <p className="mt-2 text-sm leading-6 text-muted-foreground">Usa una tarjeta de demostración para comprobar el resultado.</p>
+            <Button variant="outline" onClick={() => void registerQr('QLU-DEMO:LUIS')} disabled={processing} className="mt-4 w-full rounded-xl bg-white">
+              {processing ? <LoaderCircle className="animate-spin" /> : <Sparkles />} Probar con Luis
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
   );
 }
 
@@ -371,7 +591,7 @@ function TodayView({
                     <TableRow key={item.id}>
                       <TableCell className="font-bold">{item.time}</TableCell>
                       <TableCell>
-                        <button className="font-semibold hover:underline" onClick={() => onPatient({ id: item.id.replace('demo-', 'demo-'), name: item.name, phone: null, used: item.used, total: item.total })}>
+                        <button className="font-semibold hover:underline" onClick={() => onPatient({ id: item.patientId, name: item.name, phone: null, used: item.used, total: item.total })}>
                           {item.name}
                         </button>
                       </TableCell>
@@ -529,37 +749,133 @@ function SupplementsView({ patients, onNew }: { patients: Patient[]; onNew: () =
   );
 }
 
-function QrPoster() {
-  const [qrDataUrl, setQrDataUrl] = useState('');
-  const [checkInUrl, setCheckInUrl] = useState('');
+type PatientQrResult = {
+  firstName: string;
+  lastName: string;
+  qrValue: string;
+};
+
+async function buildPatientCard(name: string, qrValue: string) {
+  const qrDataUrl = await QRCode.toDataURL(qrValue, {
+    width: 430,
+    margin: 2,
+    errorCorrectionLevel: 'H',
+    color: { dark: '#071b2e', light: '#ffffff' },
+  });
+  const canvas = document.createElement('canvas');
+  canvas.width = 1080;
+  canvas.height = 680;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('No se pudo crear la tarjeta.');
+
+  context.fillStyle = '#e8fbff';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = '#071b2e';
+  context.beginPath();
+  context.roundRect(34, 34, 1012, 612, 42);
+  context.fill();
+  context.fillStyle = '#67e8f9';
+  context.fillRect(34, 34, 18, 612);
+
+  context.fillStyle = '#67e8f9';
+  context.font = '700 28px Arial';
+  context.fillText('QUIROPRÁCTICA', 104, 130);
+  context.fillStyle = '#ffffff';
+  context.font = '900 48px Arial';
+  context.fillText('LEÓN UNIVERSAL', 104, 188);
+
+  context.fillStyle = '#94a3b8';
+  context.font = '700 23px Arial';
+  context.fillText('PACIENTE', 104, 315);
+  context.fillStyle = '#ffffff';
+  context.font = '900 43px Arial';
+  const shortName = name.length > 24 ? `${name.slice(0, 23)}…` : name;
+  context.fillText(shortName, 104, 372);
+  context.fillStyle = '#cbd5e1';
+  context.font = '400 24px Arial';
+  context.fillText('Presenta esta tarjeta al llegar.', 104, 452);
+  context.fillText('No contiene información clínica.', 104, 492);
+
+  const qrImage = document.createElement('img');
+  qrImage.src = qrDataUrl;
+  await new Promise<void>((resolve, reject) => {
+    qrImage.onload = () => resolve();
+    qrImage.onerror = () => reject(new Error('No se pudo cargar el QR.'));
+  });
+  context.fillStyle = '#ffffff';
+  context.beginPath();
+  context.roundRect(660, 96, 326, 430, 28);
+  context.fill();
+  context.drawImage(qrImage, 696, 124, 254, 254);
+  context.fillStyle = '#071b2e';
+  context.font = '900 22px Arial';
+  context.textAlign = 'center';
+  context.fillText('CÓDIGO PERSONAL', 823, 432);
+  context.fillStyle = '#475569';
+  context.font = '400 18px Arial';
+  context.fillText('Muéstralo al profesional', 823, 468);
+  context.textAlign = 'left';
+
+  return canvas.toDataURL('image/png');
+}
+
+function PatientQrCard({ name, qrValue }: { name: string; qrValue: string }) {
+  const [cardUrl, setCardUrl] = useState('');
+  const [sharing, setSharing] = useState(false);
+
   useEffect(() => {
-    const url = `${window.location.origin}/?qr=${encodeURIComponent(CLINIC_QR_CODE)}`;
-    void QRCode.toDataURL(url, { width: 620, margin: 2, color: { dark: '#073842', light: '#ffffff' } }).then((dataUrl) => {
-      setCheckInUrl(url);
-      setQrDataUrl(dataUrl);
+    let active = true;
+    void buildPatientCard(name, qrValue).then((url) => {
+      if (active) setCardUrl(url);
     });
-  }, []);
+    return () => { active = false; };
+  }, [name, qrValue]);
+
+  const fileName = `tarjeta-qr-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.png`;
+
+  async function share() {
+    if (!cardUrl) return;
+    setSharing(true);
+    try {
+      const blob = await (await fetch(cardUrl)).blob();
+      const file = new File([blob], fileName, { type: 'image/png' });
+      if (navigator.share && navigator.canShare?.({ files: [file] })) {
+        await navigator.share({
+          title: `Tarjeta QR de ${name}`,
+          text: 'Tarjeta de paciente de Quiropráctica León Universal.',
+          files: [file],
+        });
+      } else {
+        const link = document.createElement('a');
+        link.href = cardUrl;
+        link.download = fileName;
+        link.click();
+      }
+    } finally {
+      setSharing(false);
+    }
+  }
 
   return (
-    <div className="space-y-5">
-      <div><h2 className="text-3xl font-black tracking-tight">Código QR de entrada</h2><p className="mt-1 text-muted-foreground">Imprime este cartel y colócalo en un lugar bien iluminado.</p></div>
-      <div className="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
-        <Card className="rounded-3xl border-0 shadow-sm">
-          <CardContent className="p-6 sm:p-8">
-            <div id="qr-poster" className="mx-auto max-w-md rounded-[2rem] border-8 border-primary bg-white p-7 text-center">
-              <div className="flex items-center justify-center gap-2 text-primary"><Sparkles className="size-5" /><strong className="uppercase tracking-[0.16em]">Centro Quiropráctico</strong></div>
-              <h3 className="mt-7 text-3xl font-black tracking-tight text-slate-950">Registra tu llegada</h3>
-              <p className="mt-2 text-slate-600">Abre la cámara de tu celular y escanea el código.</p>
-              {qrDataUrl ? <Image unoptimized src={qrDataUrl} width={288} height={288} alt="Código QR para registrar la llegada" className="mx-auto mt-5 aspect-square w-full max-w-72" /> : <div className="mx-auto mt-5 grid aspect-square max-w-72 place-items-center bg-muted"><LoaderCircle className="animate-spin" /></div>}
-              <div className="mt-5 rounded-2xl bg-cyan-50 p-4 text-sm font-semibold text-cyan-950">Luego busca tu nombre y confirma tu código personal.</div>
-            </div>
-          </CardContent>
-        </Card>
-        <div className="space-y-4">
-          <Card className="rounded-3xl border-0 shadow-sm"><CardContent className="p-6"><QrCode className="size-7 text-cyan-700" /><h3 className="mt-5 text-xl font-extrabold">Listo para imprimir</h3><p className="mt-2 text-sm leading-6 text-muted-foreground">El QR abre esta misma página con la ubicación confirmada. No contiene nombres, citas ni información clínica.</p><div className="mt-5 flex flex-wrap gap-3"><Button onClick={() => window.print()} className="rounded-xl"><Printer /> Imprimir cartel</Button>{qrDataUrl && <a href={qrDataUrl} download="qr-entrada-clinica.png" className={cn(buttonVariants({ variant: 'outline' }), 'rounded-xl')}><Download /> Descargar QR</a>}</div></CardContent></Card>
-          <Card className="rounded-3xl border-0 shadow-sm"><CardContent className="p-6"><p className="text-sm font-semibold text-muted-foreground">Dirección del registro</p><p className="mt-2 break-all rounded-xl bg-muted p-3 font-mono text-xs">{checkInUrl}</p></CardContent></Card>
-        </div>
+    <div className="mt-6">
+      <div className="overflow-hidden rounded-3xl border bg-slate-950 p-3 shadow-lg">
+        {cardUrl ? (
+          <Image unoptimized src={cardUrl} width={1080} height={680} alt={`Tarjeta QR de ${name}`} className="h-auto w-full rounded-2xl" />
+        ) : (
+          <div className="grid aspect-[1080/680] place-items-center text-white"><LoaderCircle className="size-8 animate-spin" /></div>
+        )}
       </div>
+      <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:justify-center">
+        <Button onClick={() => void share()} disabled={!cardUrl || sharing} className="h-12 rounded-xl font-bold">
+          {sharing ? <LoaderCircle className="animate-spin" /> : <QrCode />} Enviar o compartir
+        </Button>
+        {cardUrl && (
+          <a href={cardUrl} download={fileName} className={cn(buttonVariants({ variant: 'outline' }), 'h-12 rounded-xl px-5 font-bold')}>
+            <Download /> Descargar imagen
+          </a>
+        )}
+      </div>
+      <p className="mt-3 text-center text-xs text-muted-foreground">Puedes enviarla por WhatsApp o imprimirla. El QR no muestra datos médicos.</p>
     </div>
   );
 }
@@ -567,7 +883,7 @@ function QrPoster() {
 function NewPatientDialog({ open, onOpenChange, onSaved }: { open: boolean; onOpenChange: (open: boolean) => void; onSaved: () => void }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
-  const [result, setResult] = useState<{ firstName: string; lastName: string; pin: string } | null>(null);
+  const [result, setResult] = useState<PatientQrResult | null>(null);
   const today = new Date().toISOString().slice(0, 10);
 
   async function submit(event: React.SyntheticEvent<HTMLFormElement>) {
@@ -576,29 +892,77 @@ function NewPatientDialog({ open, onOpenChange, onSaved }: { open: boolean; onOp
     const form = new FormData(event.currentTarget);
     const payload = Object.fromEntries(form.entries());
     const response = await fetch('/api/admin/patients', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...payload, totalSessions: Number(payload.totalSessions) }) });
-    const body = (await response.json()) as { error?: string; firstName?: string; lastName?: string; pin?: string };
+    const body = (await response.json()) as { error?: string; firstName?: string; lastName?: string; qrValue?: string };
     setSaving(false);
     if (!response.ok) { setError(body.error || 'No se pudo guardar.'); return; }
-    setResult({ firstName: body.firstName!, lastName: body.lastName!, pin: body.pin! });
+    setResult({ firstName: body.firstName!, lastName: body.lastName!, qrValue: body.qrValue! });
     onSaved();
   }
 
   return (
     <Dialog open={open} onOpenChange={(next) => { onOpenChange(next); if (!next) { setResult(null); setError(''); } }}>
-      <DialogContent className="max-h-[92vh] max-w-xl overflow-y-auto rounded-[1.75rem] p-6 sm:p-7">
+      <DialogContent className="max-h-[92vh] max-w-3xl overflow-y-auto rounded-[1.75rem] p-6 sm:p-7">
         {result ? (
-          <div className="py-5 text-center"><span className="mx-auto grid size-16 place-items-center rounded-full bg-emerald-100 text-emerald-700"><Check className="size-8" /></span><DialogTitle className="mt-6 text-2xl font-black">Paciente registrado</DialogTitle><DialogDescription className="mt-2 text-base">Entrega este código a {result.firstName} {result.lastName}. Se mostrará solamente esta vez.</DialogDescription><div className="mx-auto mt-6 max-w-xs rounded-2xl bg-slate-950 px-6 py-5 font-mono text-3xl font-black tracking-[0.25em] text-white">{result.pin}</div><Button className="mt-6 h-11 rounded-xl" onClick={() => onOpenChange(false)}>Terminar</Button></div>
+          <div className="py-2 text-center"><span className="mx-auto grid size-16 place-items-center rounded-full bg-emerald-100 text-emerald-700"><Check className="size-8" /></span><DialogTitle className="mt-5 text-2xl font-black">Paciente y tarjeta creados</DialogTitle><DialogDescription className="mt-2 text-base">Envía esta imagen a {result.firstName} {result.lastName} para que la muestre en cada visita.</DialogDescription><PatientQrCard name={`${result.firstName} ${result.lastName}`} qrValue={result.qrValue} /><Button variant="ghost" className="mt-3 h-11 rounded-xl" onClick={() => onOpenChange(false)}>Terminar</Button></div>
         ) : (
-          <><DialogHeader><DialogTitle className="text-xl font-extrabold">Registrar paciente</DialogTitle><DialogDescription className="text-base">Crea su expediente, plan de sesiones y primera cita.</DialogDescription></DialogHeader><form onSubmit={submit} className="mt-2 grid gap-4 sm:grid-cols-2"><div className="space-y-2"><Label htmlFor="firstName">Nombres</Label><Input id="firstName" name="firstName" required className="h-11 rounded-xl" /></div><div className="space-y-2"><Label htmlFor="lastName">Apellidos</Label><Input id="lastName" name="lastName" required className="h-11 rounded-xl" /></div><div className="space-y-2"><Label htmlFor="phone">Teléfono</Label><Input id="phone" name="phone" inputMode="tel" className="h-11 rounded-xl" /></div><div className="space-y-2"><Label htmlFor="birthDate">Fecha de nacimiento</Label><Input id="birthDate" name="birthDate" type="date" className="h-11 rounded-xl" /></div><div className="space-y-2"><Label htmlFor="sex">Sexo</Label><Select name="sex"><SelectTrigger id="sex" className="h-11 w-full rounded-xl"><SelectValue placeholder="Seleccionar" /></SelectTrigger><SelectContent><SelectItem value="female">Femenino</SelectItem><SelectItem value="male">Masculino</SelectItem><SelectItem value="not_specified">No especificado</SelectItem></SelectContent></Select></div><div className="space-y-2"><Label htmlFor="totalSessions">Plan de sesiones</Label><Input id="totalSessions" name="totalSessions" type="number" min="1" max="99" defaultValue="8" className="h-11 rounded-xl" /></div><div className="space-y-2"><Label htmlFor="appointmentDate">Fecha de primera cita</Label><Input id="appointmentDate" name="appointmentDate" type="date" defaultValue={today} className="h-11 rounded-xl" /></div><div className="space-y-2"><Label htmlFor="appointmentTime">Hora de la cita</Label><Input id="appointmentTime" name="appointmentTime" type="time" min="08:00" max="21:00" className="h-11 rounded-xl" /></div>{error && <p className="sm:col-span-2 rounded-xl bg-red-50 p-3 text-sm font-medium text-red-800">{error}</p>}<Button type="submit" disabled={saving} className="mt-2 h-12 rounded-xl font-bold sm:col-span-2">{saving ? <LoaderCircle className="animate-spin" /> : <UserPlus />} Guardar y generar código</Button></form></>
+          <><DialogHeader><DialogTitle className="text-xl font-extrabold">Registrar paciente</DialogTitle><DialogDescription className="text-base">Crea su expediente, plan de sesiones, primera cita y tarjeta QR.</DialogDescription></DialogHeader><form onSubmit={submit} className="mt-2 grid gap-4 sm:grid-cols-2"><div className="space-y-2"><Label htmlFor="firstName">Nombres</Label><Input id="firstName" name="firstName" required className="h-11 rounded-xl" /></div><div className="space-y-2"><Label htmlFor="lastName">Apellidos</Label><Input id="lastName" name="lastName" required className="h-11 rounded-xl" /></div><div className="space-y-2"><Label htmlFor="phone">Teléfono</Label><Input id="phone" name="phone" inputMode="tel" className="h-11 rounded-xl" /></div><div className="space-y-2"><Label htmlFor="birthDate">Fecha de nacimiento</Label><Input id="birthDate" name="birthDate" type="date" className="h-11 rounded-xl" /></div><div className="space-y-2"><Label htmlFor="sex">Sexo</Label><Select name="sex"><SelectTrigger id="sex" className="h-11 w-full rounded-xl"><SelectValue placeholder="Seleccionar" /></SelectTrigger><SelectContent><SelectItem value="female">Femenino</SelectItem><SelectItem value="male">Masculino</SelectItem><SelectItem value="not_specified">No especificado</SelectItem></SelectContent></Select></div><div className="space-y-2"><Label htmlFor="totalSessions">Plan de sesiones</Label><Input id="totalSessions" name="totalSessions" type="number" min="1" max="99" defaultValue="8" className="h-11 rounded-xl" /></div><div className="space-y-2"><Label htmlFor="appointmentDate">Fecha de primera cita</Label><Input id="appointmentDate" name="appointmentDate" type="date" defaultValue={today} className="h-11 rounded-xl" /></div><div className="space-y-2"><Label htmlFor="appointmentTime">Hora de la cita</Label><Input id="appointmentTime" name="appointmentTime" type="time" min="08:00" max="21:00" className="h-11 rounded-xl" /></div>{error && <p className="sm:col-span-2 rounded-xl bg-red-50 p-3 text-sm font-medium text-red-800">{error}</p>}<Button type="submit" disabled={saving} className="mt-2 h-12 rounded-xl font-bold sm:col-span-2">{saving ? <LoaderCircle className="animate-spin" /> : <UserPlus />} Guardar y crear tarjeta QR</Button></form></>
         )}
       </DialogContent>
     </Dialog>
   );
 }
 
-function PatientDialog({ patient, onOpenChange }: { patient: Patient | null; onOpenChange: (open: boolean) => void }) {
+type PatientRecord = {
+  assessment: null | {
+    reason?: string; conditions?: string; bodyAnalysis?: string; weightKg?: number;
+    heightCm?: number; bmi?: number; healthyWeightMinKg?: number; healthyWeightMaxKg?: number;
+    targetWeightKg?: number; dietPlan?: string; notes?: string; assessedAt?: string;
+  };
+  plan: null | { totalSessions: number; usedSessions: number; sessionsPerWeek: number; startDate?: string; totalAmountCents: number };
+  payments: { id: string; amountCents: number; method?: string; paidAt: string }[];
+  supplements: { id: string; name: string; instructions?: string; quantity?: string }[];
+};
+
+function PatientDialog({ patient, onOpenChange, onDeleted, onSaved }: { patient: Patient | null; onOpenChange: (open: boolean) => void; onDeleted: () => void; onSaved: () => void }) {
   const [uploading, setUploading] = useState('');
   const [message, setMessage] = useState('');
+  const [qrValue, setQrValue] = useState<string | null>(patient?.qrValue ?? null);
+  const [showQr, setShowQr] = useState(false);
+  const [qrLoading, setQrLoading] = useState(false);
+  const [record, setRecord] = useState<PatientRecord | null>(null);
+  const [recordLoading, setRecordLoading] = useState(false);
+  const [savingRecord, setSavingRecord] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [weight, setWeight] = useState('');
+  const [height, setHeight] = useState('');
+  const [targetWeight, setTargetWeight] = useState('');
+
+  const loadRecord = useCallback(async () => {
+    if (!patient || patient.id.startsWith('demo-')) return;
+    await Promise.resolve();
+    setRecordLoading(true);
+    const response = await fetch(`/api/admin/records?patientId=${encodeURIComponent(patient.id)}`);
+    const body = (await response.json()) as PatientRecord & { error?: string };
+    setRecordLoading(false);
+    if (!response.ok) { setMessage(body.error || 'No se pudo cargar el expediente.'); return; }
+    setRecord(body);
+    setWeight(body.assessment?.weightKg?.toString() ?? '');
+    setHeight(body.assessment?.heightCm?.toString() ?? '');
+    setTargetWeight(body.assessment?.targetWeightKg?.toString() ?? '');
+  }, [patient]);
+
+  // oxlint-disable-next-line react-compiler/react-compiler -- load the selected patient's server record when the dialog opens
+  useEffect(() => { void loadRecord(); }, [loadRecord]);
+
+  const liveBmi = Number(weight) > 0 && Number(height) > 0
+    ? Number(weight) / ((Number(height) / 100) ** 2)
+    : null;
+  const healthyMin = Number(height) > 0 ? 18.5 * ((Number(height) / 100) ** 2) : null;
+  const healthyMax = Number(height) > 0 ? 24.9 * ((Number(height) / 100) ** 2) : null;
+  const kilosToTarget = Number(weight) > 0 && Number(targetWeight) > 0 ? Math.max(0, Number(weight) - Number(targetWeight)) : null;
+  const paidCents = record?.payments.reduce((sum, payment) => sum + payment.amountCents, 0) ?? 0;
+  const totalCents = record?.plan?.totalAmountCents ?? 0;
+
   async function upload(file: File | undefined, category: string) {
     if (!file || !patient) return;
     setUploading(category); setMessage('');
@@ -608,9 +972,162 @@ function PatientDialog({ patient, onOpenChange }: { patient: Patient | null; onO
     const body = (await response.json()) as { error?: string; fileName?: string };
     setMessage(response.ok ? `Fotografía ${body.fileName} guardada.` : body.error || 'No se pudo guardar.'); setUploading('');
   }
+
+  async function createQr() {
+    if (!patient) return;
+    if (patient.id.startsWith('demo-')) {
+      setQrValue(patient.qrValue ?? 'QLU-DEMO:LUIS');
+      setShowQr(true);
+      return;
+    }
+    setQrLoading(true);
+    setMessage('');
+    const response = await fetch('/api/admin/patients', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ patientId: patient.id }),
+    });
+    const body = (await response.json()) as { error?: string; qrValue?: string };
+    setQrLoading(false);
+    if (!response.ok || !body.qrValue) {
+      setMessage(body.error || 'No se pudo crear la tarjeta QR.');
+      return;
+    }
+    setQrValue(body.qrValue);
+    setShowQr(true);
+  }
+
+  async function saveAssessment(event: React.SyntheticEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!patient) return;
+    setSavingRecord(true); setMessage('');
+    const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+    const response = await fetch('/api/admin/records', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...payload, patientId: patient.id }),
+    });
+    const body = (await response.json()) as { error?: string };
+    setSavingRecord(false);
+    if (!response.ok) { setMessage(body.error || 'No se pudo guardar la evaluación.'); return; }
+    setMessage('Evaluación, plan y pago guardados correctamente.');
+    await loadRecord();
+    onSaved();
+  }
+
+  async function deletePatient() {
+    if (!patient) return;
+    setDeleting(true); setMessage('');
+    const response = await fetch('/api/admin/patients', {
+      method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ patientId: patient.id }),
+    });
+    const body = (await response.json()) as { error?: string };
+    setDeleting(false);
+    if (!response.ok) { setMessage(body.error || 'No se pudo eliminar.'); return; }
+    onDeleted();
+  }
+
   return (
     <Dialog open={Boolean(patient)} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl rounded-[1.75rem] p-6 sm:p-7"><DialogHeader><DialogTitle className="text-2xl font-black">{patient?.name}</DialogTitle><DialogDescription>Resumen del expediente y plan de atención.</DialogDescription></DialogHeader>{patient && <div className="mt-2 space-y-5"><div className="grid gap-3 sm:grid-cols-3"><div className="rounded-2xl bg-muted p-4"><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Sesiones</p><p className="mt-2 text-2xl font-black">{patient.used} / {patient.total}</p></div><div className="rounded-2xl bg-cyan-50 p-4"><p className="text-xs font-semibold uppercase tracking-wider text-cyan-800">Teléfono</p><p className="mt-2 font-bold">{patient.phone || 'Sin registrar'}</p></div><div className="rounded-2xl bg-emerald-50 p-4"><p className="text-xs font-semibold uppercase tracking-wider text-emerald-800">Estado</p><p className="mt-2 font-bold">Plan activo</p></div></div><div><div className="flex justify-between text-sm"><span className="text-muted-foreground">Progreso del plan</span><strong>{Math.max(0, patient.total - patient.used)} restantes</strong></div><Progress value={patient.total ? (patient.used / patient.total) * 100 : 0} className="mt-2" /></div><div><h3 className="font-extrabold">Fotografías de evolución</h3><p className="mt-1 text-sm text-muted-foreground">Archivos privados ligados al expediente.</p><div className="mt-3 grid gap-3 sm:grid-cols-2">{(['before', 'after'] as const).map((category) => <label key={category} className="flex min-h-28 cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed border-cyan-300 bg-cyan-50/50 p-4 text-center transition hover:bg-cyan-50"><input type="file" accept="image/*" capture="environment" className="sr-only" onChange={(event) => void upload(event.target.files?.[0], category)} /><ImagePlus className="size-6 text-cyan-800" /><span className="mt-2 text-sm font-bold">Foto {category === 'before' ? 'antes' : 'después'}</span><span className="mt-1 text-xs text-muted-foreground">{uploading === category ? 'Guardando…' : 'Tomar o seleccionar'}</span></label>)}</div>{message && <p className="mt-3 rounded-xl bg-muted p-3 text-sm">{message}</p>}</div><div className="flex flex-wrap gap-2"><Button variant="outline" className="rounded-xl"><FileText /> Nueva nota clínica</Button><Button variant="outline" className="rounded-xl"><Leaf /> Añadir suplemento</Button></div></div>}</DialogContent>
+      <DialogContent className="max-h-[94vh] max-w-5xl overflow-y-auto rounded-[1.75rem] p-6 sm:p-7">
+        <DialogHeader>
+          <DialogTitle className="text-2xl font-black">{patient?.name}</DialogTitle>
+          <DialogDescription>Evaluación, tratamiento, pagos, suplementos y evolución del paciente.</DialogDescription>
+        </DialogHeader>
+        {patient && (
+          <div className="mt-2 space-y-5">
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="rounded-2xl bg-muted p-4"><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Sesiones</p><p className="mt-2 text-2xl font-black">{patient.used} / {patient.total}</p></div>
+              <div className="rounded-2xl bg-cyan-50 p-4"><p className="text-xs font-semibold uppercase tracking-wider text-cyan-800">Teléfono</p><p className="mt-2 font-bold">{patient.phone || 'Sin registrar'}</p></div>
+              <div className="rounded-2xl bg-emerald-50 p-4"><p className="text-xs font-semibold uppercase tracking-wider text-emerald-800">Estado</p><p className="mt-2 font-bold">Plan activo</p></div>
+            </div>
+            <div>
+              <div className="flex justify-between text-sm"><span className="text-muted-foreground">Progreso del plan</span><strong>{Math.max(0, patient.total - patient.used)} restantes</strong></div>
+              <Progress value={patient.total ? (patient.used / patient.total) * 100 : 0} className="mt-2" />
+            </div>
+            {recordLoading ? (
+              <div className="flex items-center gap-2 rounded-2xl bg-muted p-4 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" /> Cargando expediente…</div>
+            ) : !patient.id.startsWith('demo-') && (
+              <form key={record?.assessment?.assessedAt ?? 'new'} onSubmit={saveAssessment} className="space-y-5 rounded-3xl border bg-white p-5">
+                <div className="flex items-center gap-3"><span className="grid size-10 place-items-center rounded-xl bg-cyan-100 text-cyan-900"><Scale className="size-5" /></span><div><h3 className="font-extrabold">Evaluación y plan</h3><p className="text-sm text-muted-foreground">Registra lo observado y lo declarado por el paciente.</p></div></div>
+                <div className="grid gap-4 md:grid-cols-3">
+                  <div className="space-y-2"><Label htmlFor="weightKg">Peso actual (kg)</Label><Input id="weightKg" name="weightKg" type="number" min="1" max="400" step="0.1" value={weight} onChange={(event) => setWeight(event.target.value)} className="h-11 rounded-xl" /></div>
+                  <div className="space-y-2"><Label htmlFor="heightCm">Talla (cm)</Label><Input id="heightCm" name="heightCm" type="number" min="50" max="250" step="0.1" value={height} onChange={(event) => setHeight(event.target.value)} className="h-11 rounded-xl" /></div>
+                  <div className="space-y-2"><Label htmlFor="targetWeightKg">Peso meta acordado (kg)</Label><Input id="targetWeightKg" name="targetWeightKg" type="number" min="1" max="400" step="0.1" value={targetWeight} onChange={(event) => setTargetWeight(event.target.value)} className="h-11 rounded-xl" /></div>
+                </div>
+                {liveBmi && healthyMin && healthyMax && (
+                  <div className="grid gap-3 rounded-2xl bg-slate-950 p-4 text-white sm:grid-cols-3">
+                    <div><p className="text-xs text-white/60">IMC orientativo</p><p className="mt-1 text-2xl font-black">{liveBmi.toFixed(1)}</p></div>
+                    <div><p className="text-xs text-white/60">Rango de referencia por IMC</p><p className="mt-1 font-bold">{healthyMin.toFixed(1)}–{healthyMax.toFixed(1)} kg</p></div>
+                    <div><p className="text-xs text-white/60">Diferencia hasta la meta</p><p className="mt-1 font-bold">{kilosToTarget !== null ? `${kilosToTarget.toFixed(1)} kg` : 'Sin meta'}</p></div>
+                  </div>
+                )}
+                <p className="text-xs leading-5 text-muted-foreground">El IMC es solo una referencia de tamizaje. La meta y las recomendaciones deben ser confirmadas por un profesional de salud considerando edad, composición corporal y antecedentes.</p>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-2"><Label htmlFor="reason">Motivo de consulta</Label><Textarea id="reason" name="reason" defaultValue={record?.assessment?.reason} placeholder="Dolor, molestia, tiempo de evolución…" className="min-h-24 rounded-xl" /></div>
+                  <div className="space-y-2"><Label htmlFor="conditions">Enfermedades y antecedentes declarados</Label><Textarea id="conditions" name="conditions" defaultValue={record?.assessment?.conditions} placeholder="Diagnósticos, operaciones, alergias, medicamentos…" className="min-h-24 rounded-xl" /></div>
+                  <div className="space-y-2"><Label htmlFor="bodyAnalysis">Análisis corporal</Label><Textarea id="bodyAnalysis" name="bodyAnalysis" defaultValue={record?.assessment?.bodyAnalysis} placeholder="Postura, movilidad, zonas observadas…" className="min-h-24 rounded-xl" /></div>
+                  <div className="space-y-2"><Label htmlFor="dietPlan">Dieta o recomendaciones</Label><Textarea id="dietPlan" name="dietPlan" defaultValue={record?.assessment?.dietPlan} placeholder="Indicaciones acordadas y seguimiento…" className="min-h-24 rounded-xl" /></div>
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                  <div className="space-y-2"><Label htmlFor="totalSessions">Sesiones del plan</Label><Input id="totalSessions" name="totalSessions" type="number" min="1" max="99" defaultValue={record?.plan?.totalSessions ?? patient.total} className="h-11 rounded-xl" /></div>
+                  <div className="space-y-2"><Label htmlFor="sessionsPerWeek">Veces por semana</Label><Input id="sessionsPerWeek" name="sessionsPerWeek" type="number" min="1" max="7" defaultValue={record?.plan?.sessionsPerWeek ?? 3} className="h-11 rounded-xl" /></div>
+                  <div className="space-y-2"><Label htmlFor="startDate">Inicio del plan</Label><Input id="startDate" name="startDate" type="date" defaultValue={record?.plan?.startDate ?? new Date().toISOString().slice(0, 10)} className="h-11 rounded-xl" /></div>
+                  <div className="space-y-2"><Label htmlFor="totalAmount">Monto total (S/)</Label><Input id="totalAmount" name="totalAmount" type="number" min="0" step="0.01" defaultValue={totalCents ? (totalCents / 100).toFixed(2) : ''} className="h-11 rounded-xl" /></div>
+                </div>
+                <div className="grid gap-4 rounded-2xl border border-emerald-200 bg-emerald-50/60 p-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
+                  <div className="space-y-2"><Label htmlFor="paymentAmount">Nuevo abono (S/)</Label><Input id="paymentAmount" name="paymentAmount" type="number" min="0" step="0.01" placeholder="0.00" className="h-11 rounded-xl bg-white" /></div>
+                  <div className="space-y-2"><Label htmlFor="paymentMethod">Forma de pago</Label><Select name="paymentMethod"><SelectTrigger id="paymentMethod" className="h-11 w-full rounded-xl bg-white"><SelectValue placeholder="Seleccionar" /></SelectTrigger><SelectContent><SelectItem value="cash">Efectivo</SelectItem><SelectItem value="yape">Yape</SelectItem><SelectItem value="plin">Plin</SelectItem><SelectItem value="transfer">Transferencia</SelectItem><SelectItem value="card">Tarjeta</SelectItem></SelectContent></Select></div>
+                  <div className="min-w-36 rounded-xl bg-white px-4 py-2.5"><p className="text-xs text-muted-foreground">Pagado / saldo</p><p className="font-black">S/ {(paidCents / 100).toFixed(2)} · S/ {(Math.max(0, totalCents - paidCents) / 100).toFixed(2)}</p></div>
+                </div>
+                <div className="space-y-2"><Label htmlFor="notes">Notas adicionales</Label><Textarea id="notes" name="notes" defaultValue={record?.assessment?.notes} className="min-h-20 rounded-xl" /></div>
+                <Button type="submit" disabled={savingRecord} className="h-12 w-full rounded-xl font-bold">{savingRecord ? <LoaderCircle className="animate-spin" /> : <CheckCircle2 />} Guardar evaluación y plan</Button>
+              </form>
+            )}
+            {record && (record.payments.length > 0 || record.supplements.length > 0) && (
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="rounded-2xl border p-4"><h3 className="flex items-center gap-2 font-extrabold"><WalletCards className="size-5 text-emerald-700" /> Historial de pagos</h3><div className="mt-3 space-y-2">{record.payments.map((payment) => <div key={payment.id} className="flex justify-between rounded-xl bg-muted px-3 py-2 text-sm"><span>{payment.method || 'Pago'} · {new Date(payment.paidAt).toLocaleDateString('es-PE')}</span><strong>S/ {(payment.amountCents / 100).toFixed(2)}</strong></div>)}</div></div>
+                <div className="rounded-2xl border p-4"><h3 className="flex items-center gap-2 font-extrabold"><Leaf className="size-5 text-emerald-700" /> Suplementos indicados</h3><div className="mt-3 space-y-2">{record.supplements.map((item) => <div key={item.id} className="rounded-xl bg-muted px-3 py-2 text-sm"><strong>{item.name}</strong><p className="text-muted-foreground">{item.instructions || 'Sin indicaciones registradas'}</p></div>)}</div></div>
+              </div>
+            )}
+            <div className="rounded-2xl border border-cyan-200 bg-cyan-50/60 p-4">
+              <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                <div><h3 className="font-extrabold">Tarjeta personal QR</h3><p className="mt-1 text-sm text-muted-foreground">El paciente la presenta en cada visita.</p></div>
+                {qrValue ? (
+                  <Button onClick={() => setShowQr((current) => !current)} className="rounded-xl"><QrCode /> {showQr ? 'Ocultar tarjeta' : 'Ver y compartir'}</Button>
+                ) : (
+                  <Button onClick={() => void createQr()} disabled={qrLoading} className="rounded-xl">{qrLoading ? <LoaderCircle className="animate-spin" /> : <QrCode />} Crear tarjeta</Button>
+                )}
+              </div>
+              {showQr && qrValue && <PatientQrCard name={patient.name} qrValue={qrValue} />}
+            </div>
+            <div>
+              <h3 className="font-extrabold">Fotografías de evolución</h3>
+              <p className="mt-1 text-sm text-muted-foreground">Archivos privados ligados al expediente.</p>
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                {(['before', 'after'] as const).map((category) => (
+                  <label key={category} className="flex min-h-28 cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed border-cyan-300 bg-cyan-50/50 p-4 text-center transition hover:bg-cyan-50">
+                    <input type="file" accept="image/*" capture="environment" className="sr-only" onChange={(event) => void upload(event.target.files?.[0], category)} />
+                    <ImagePlus className="size-6 text-cyan-800" />
+                    <span className="mt-2 text-sm font-bold">Foto {category === 'before' ? 'antes' : 'después'}</span>
+                    <span className="mt-1 text-xs text-muted-foreground">{uploading === category ? 'Guardando…' : 'Tomar o seleccionar'}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+            {message && <p className="rounded-xl bg-muted p-3 text-sm font-medium">{message}</p>}
+            <div className="flex flex-wrap justify-between gap-2">
+              <Button variant="outline" className="rounded-xl" onClick={() => document.getElementById('reason')?.focus()}><FileText /> Ir a evaluación</Button>
+              {!patient.id.startsWith('demo-') && (
+                <AlertDialog>
+                  <AlertDialogTrigger render={<Button variant="outline" className="rounded-xl border-red-200 text-red-700 hover:bg-red-50" />}><Trash2 /> Eliminar paciente</AlertDialogTrigger>
+                  <AlertDialogContent><AlertDialogHeader><AlertDialogTitle>¿Eliminar a {patient.name}?</AlertDialogTitle><AlertDialogDescription>Se borrarán su expediente, citas, asistencias, pagos, fotos registradas y suplementos. Esta acción no se puede deshacer.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Cancelar</AlertDialogCancel><AlertDialogAction onClick={() => void deletePatient()} disabled={deleting} className="bg-red-700 hover:bg-red-800">{deleting ? 'Eliminando…' : 'Sí, eliminar'}</AlertDialogAction></AlertDialogFooter></AlertDialogContent>
+                </AlertDialog>
+              )}
+            </div>
+          </div>
+        )}
+      </DialogContent>
     </Dialog>
   );
 }

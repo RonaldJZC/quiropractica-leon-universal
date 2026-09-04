@@ -1,5 +1,6 @@
 import {
   integer,
+  real,
   sqliteTable,
   text,
   uniqueIndex,
@@ -18,9 +19,14 @@ export const patients = sqliteTable(
     phone: text('phone'),
     email: text('email'),
     pinHash: text('pin_hash').notNull(),
+    qrToken: text('qr_token'),
+    qrIssuedAt: text('qr_issued_at'),
     createdAt: text('created_at').notNull(),
   },
-  (table) => [index('idx_patients_search_name').on(table.searchName)],
+  (table) => [
+    index('idx_patients_search_name').on(table.searchName),
+    uniqueIndex('idx_patients_qr_token').on(table.qrToken),
+  ],
 );
 
 export const appointments = sqliteTable(
@@ -74,6 +80,9 @@ export const sessionPackages = sqliteTable(
       .references(() => patients.id, { onDelete: 'cascade' }),
     totalSessions: integer('total_sessions').notNull(),
     usedSessions: integer('used_sessions').notNull().default(0),
+    sessionsPerWeek: integer('sessions_per_week').notNull().default(1),
+    startDate: text('start_date'),
+    totalAmountCents: integer('total_amount_cents').notNull().default(0),
     createdAt: text('created_at').notNull(),
   },
   (table) => [index('idx_session_packages_patient_id').on(table.patientId)],
@@ -95,6 +104,44 @@ export const clinicalVisits = sqliteTable(
     createdAt: text('created_at').notNull(),
   },
   (table) => [index('idx_clinical_visits_patient_id').on(table.patientId)],
+);
+
+export const patientAssessments = sqliteTable(
+  'patient_assessments',
+  {
+    id: text('id').primaryKey(),
+    patientId: text('patient_id')
+      .notNull()
+      .references(() => patients.id, { onDelete: 'cascade' }),
+    reason: text('reason'),
+    conditions: text('conditions'),
+    bodyAnalysis: text('body_analysis'),
+    weightKg: real('weight_kg'),
+    heightCm: real('height_cm'),
+    bmi: real('bmi'),
+    healthyWeightMinKg: real('healthy_weight_min_kg'),
+    healthyWeightMaxKg: real('healthy_weight_max_kg'),
+    targetWeightKg: real('target_weight_kg'),
+    dietPlan: text('diet_plan'),
+    notes: text('notes'),
+    assessedAt: text('assessed_at').notNull(),
+  },
+  (table) => [index('idx_patient_assessments_patient_date').on(table.patientId, table.assessedAt)],
+);
+
+export const payments = sqliteTable(
+  'payments',
+  {
+    id: text('id').primaryKey(),
+    patientId: text('patient_id')
+      .notNull()
+      .references(() => patients.id, { onDelete: 'cascade' }),
+    amountCents: integer('amount_cents').notNull(),
+    method: text('method'),
+    notes: text('notes'),
+    paidAt: text('paid_at').notNull(),
+  },
+  (table) => [index('idx_payments_patient_date').on(table.patientId, table.paidAt)],
 );
 
 export const supplements = sqliteTable(

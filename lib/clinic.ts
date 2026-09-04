@@ -1,5 +1,5 @@
 export const CLINIC_TIME_ZONE = 'America/Lima';
-export const CLINIC_QR_CODE = 'CQP-ENTRADA-01';
+export const PATIENT_QR_PREFIX = 'QLU-PACIENTE:';
 
 export function todayInLima() {
   return new Intl.DateTimeFormat('en-CA', {
@@ -43,4 +43,32 @@ export function generatePin() {
   const values = new Uint32Array(1);
   crypto.getRandomValues(values);
   return String(100000 + (values[0] % 900000));
+}
+
+export function generatePatientQrToken() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
+export function makePatientQrValue(token: string) {
+  return `${PATIENT_QR_PREFIX}${token}`;
+}
+
+export function readPatientQrToken(value: string) {
+  if (!value.startsWith(PATIENT_QR_PREFIX)) return null;
+  const token = value.slice(PATIENT_QR_PREFIX.length);
+  return /^[A-Za-z0-9_-]{32,128}$/.test(token) ? token : null;
+}
+
+export function timeInLima() {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: CLINIC_TIME_ZONE,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(new Date());
 }

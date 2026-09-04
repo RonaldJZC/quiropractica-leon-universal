@@ -13,9 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'Centro Quiropráctico | Registro de llegada',
+  title: 'Quiropráctica León Universal',
   description:
-    'Agenda, llegada y seguimiento de sesiones para atención quiropráctica.',
+    'Gestión de pacientes, asistencias y sesiones de Quiropráctica León Universal.',
 };
 
 export default function RootLayout({
