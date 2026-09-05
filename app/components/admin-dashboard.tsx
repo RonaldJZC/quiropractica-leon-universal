@@ -5,6 +5,7 @@ import Image from 'next/image';
 import QRCode from 'qrcode';
 import {
   Activity,
+  ArrowLeft,
   Camera,
   CalendarDays,
   Check,
@@ -225,10 +226,10 @@ export function AdminDashboard({ user }: { user: { name: string; email: string }
             <SidebarTrigger className="md:hidden" />
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.13em] text-muted-foreground">Panel profesional</p>
-              <h1 className="text-xl font-black tracking-tight">{title}</h1>
+              <h1 className="text-xl font-black tracking-tight">{patientOpen ? 'Expediente del paciente' : title}</h1>
             </div>
           </div>
-          <Button onClick={() => setNewPatientOpen(true)} className="h-11 rounded-xl px-4 font-bold">
+          <Button onClick={() => setNewPatientOpen(true)} className={cn('h-11 rounded-xl px-4 font-bold', patientOpen && 'hidden')}>
             <UserPlus className="size-4" />
             <span className="hidden sm:inline">Nuevo paciente</span>
             <span className="sm:hidden">Nuevo</span>
@@ -244,6 +245,15 @@ export function AdminDashboard({ user }: { user: { name: string; email: string }
               </div>
             </div>
           ) : (
+            patientOpen ? (
+              <PatientRecordPage
+                key={patientOpen.id}
+                patient={patientOpen}
+                onBack={() => { setPatientOpen(null); setView('patients'); }}
+                onDeleted={() => { setPatientOpen(null); setView('patients'); void refresh(); }}
+                onSaved={() => void refresh()}
+              />
+            ) : (
             <>
               {data.demo && (
                 <div className="mb-5 flex items-center gap-3 rounded-2xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm text-cyan-950">
@@ -294,6 +304,7 @@ export function AdminDashboard({ user }: { user: { name: string; email: string }
                 <SupplementsView patients={data.patients} onNew={() => setSupplementOpen(true)} />
               )}
             </>
+            )
           )}
         </div>
       </SidebarInset>
@@ -302,13 +313,7 @@ export function AdminDashboard({ user }: { user: { name: string; email: string }
         open={newPatientOpen}
         onOpenChange={setNewPatientOpen}
         onSaved={() => void refresh()}
-      />
-      <PatientDialog
-        key={patientOpen?.id ?? 'closed'}
-        patient={patientOpen}
-        onOpenChange={(open) => !open && setPatientOpen(null)}
-        onDeleted={() => { setPatientOpen(null); void refresh(); }}
-        onSaved={() => void refresh()}
+        onFinished={(patient) => { setNewPatientOpen(false); setPatientOpen(patient); }}
       />
       <SupplementDialog
         patients={data?.patients ?? []}
@@ -753,6 +758,7 @@ type PatientQrResult = {
   firstName: string;
   lastName: string;
   qrValue: string;
+  patient: Patient;
 };
 
 async function buildPatientCard(name: string, qrValue: string) {
@@ -880,7 +886,7 @@ function PatientQrCard({ name, qrValue }: { name: string; qrValue: string }) {
   );
 }
 
-function NewPatientDialog({ open, onOpenChange, onSaved }: { open: boolean; onOpenChange: (open: boolean) => void; onSaved: () => void }) {
+function NewPatientDialog({ open, onOpenChange, onSaved, onFinished }: { open: boolean; onOpenChange: (open: boolean) => void; onSaved: () => void; onFinished: (patient: Patient) => void }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState<PatientQrResult | null>(null);
@@ -892,10 +898,19 @@ function NewPatientDialog({ open, onOpenChange, onSaved }: { open: boolean; onOp
     const form = new FormData(event.currentTarget);
     const payload = Object.fromEntries(form.entries());
     const response = await fetch('/api/admin/patients', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...payload, totalSessions: Number(payload.totalSessions) }) });
-    const body = (await response.json()) as { error?: string; firstName?: string; lastName?: string; qrValue?: string };
+    const body = (await response.json()) as { error?: string; patientId?: string; firstName?: string; lastName?: string; qrValue?: string };
     setSaving(false);
     if (!response.ok) { setError(body.error || 'No se pudo guardar.'); return; }
-    setResult({ firstName: body.firstName!, lastName: body.lastName!, qrValue: body.qrValue! });
+    const phone = typeof payload.phone === 'string' ? payload.phone : '';
+    const patient: Patient = {
+      id: body.patientId!,
+      name: `${body.firstName} ${body.lastName}`,
+      phone: phone || null,
+      used: 0,
+      total: Number(payload.totalSessions) || 1,
+      qrValue: body.qrValue!,
+    };
+    setResult({ firstName: body.firstName!, lastName: body.lastName!, qrValue: body.qrValue!, patient });
     onSaved();
   }
 
@@ -903,7 +918,7 @@ function NewPatientDialog({ open, onOpenChange, onSaved }: { open: boolean; onOp
     <Dialog open={open} onOpenChange={(next) => { onOpenChange(next); if (!next) { setResult(null); setError(''); } }}>
       <DialogContent className="max-h-[92vh] max-w-3xl overflow-y-auto rounded-[1.75rem] p-6 sm:p-7">
         {result ? (
-          <div className="py-2 text-center"><span className="mx-auto grid size-16 place-items-center rounded-full bg-emerald-100 text-emerald-700"><Check className="size-8" /></span><DialogTitle className="mt-5 text-2xl font-black">Paciente y tarjeta creados</DialogTitle><DialogDescription className="mt-2 text-base">Envía esta imagen a {result.firstName} {result.lastName} para que la muestre en cada visita.</DialogDescription><PatientQrCard name={`${result.firstName} ${result.lastName}`} qrValue={result.qrValue} /><Button variant="ghost" className="mt-3 h-11 rounded-xl" onClick={() => onOpenChange(false)}>Terminar</Button></div>
+          <div className="py-2 text-center"><span className="mx-auto grid size-16 place-items-center rounded-full bg-emerald-100 text-emerald-700"><Check className="size-8" /></span><DialogTitle className="mt-5 text-2xl font-black">Paciente y tarjeta creados</DialogTitle><DialogDescription className="mt-2 text-base">Envía esta imagen a {result.firstName} {result.lastName} para que la muestre en cada visita.</DialogDescription><PatientQrCard name={`${result.firstName} ${result.lastName}`} qrValue={result.qrValue} /><Button className="mt-4 h-12 rounded-xl px-6 font-bold" onClick={() => onFinished(result.patient)}>Terminar y abrir expediente <ChevronRight /></Button></div>
         ) : (
           <><DialogHeader><DialogTitle className="text-xl font-extrabold">Registrar paciente</DialogTitle><DialogDescription className="text-base">Crea su expediente, plan de sesiones, primera cita y tarjeta QR.</DialogDescription></DialogHeader><form onSubmit={submit} className="mt-2 grid gap-4 sm:grid-cols-2"><div className="space-y-2"><Label htmlFor="firstName">Nombres</Label><Input id="firstName" name="firstName" required className="h-11 rounded-xl" /></div><div className="space-y-2"><Label htmlFor="lastName">Apellidos</Label><Input id="lastName" name="lastName" required className="h-11 rounded-xl" /></div><div className="space-y-2"><Label htmlFor="phone">Teléfono</Label><Input id="phone" name="phone" inputMode="tel" className="h-11 rounded-xl" /></div><div className="space-y-2"><Label htmlFor="birthDate">Fecha de nacimiento</Label><Input id="birthDate" name="birthDate" type="date" className="h-11 rounded-xl" /></div><div className="space-y-2"><Label htmlFor="sex">Sexo</Label><Select name="sex"><SelectTrigger id="sex" className="h-11 w-full rounded-xl"><SelectValue placeholder="Seleccionar" /></SelectTrigger><SelectContent><SelectItem value="female">Femenino</SelectItem><SelectItem value="male">Masculino</SelectItem><SelectItem value="not_specified">No especificado</SelectItem></SelectContent></Select></div><div className="space-y-2"><Label htmlFor="totalSessions">Plan de sesiones</Label><Input id="totalSessions" name="totalSessions" type="number" min="1" max="99" defaultValue="8" className="h-11 rounded-xl" /></div><div className="space-y-2"><Label htmlFor="appointmentDate">Fecha de primera cita</Label><Input id="appointmentDate" name="appointmentDate" type="date" defaultValue={today} className="h-11 rounded-xl" /></div><div className="space-y-2"><Label htmlFor="appointmentTime">Hora de la cita</Label><Input id="appointmentTime" name="appointmentTime" type="time" min="08:00" max="21:00" className="h-11 rounded-xl" /></div>{error && <p className="sm:col-span-2 rounded-xl bg-red-50 p-3 text-sm font-medium text-red-800">{error}</p>}<Button type="submit" disabled={saving} className="mt-2 h-12 rounded-xl font-bold sm:col-span-2">{saving ? <LoaderCircle className="animate-spin" /> : <UserPlus />} Guardar y crear tarjeta QR</Button></form></>
         )}
@@ -923,7 +938,7 @@ type PatientRecord = {
   supplements: { id: string; name: string; instructions?: string; quantity?: string }[];
 };
 
-function PatientDialog({ patient, onOpenChange, onDeleted, onSaved }: { patient: Patient | null; onOpenChange: (open: boolean) => void; onDeleted: () => void; onSaved: () => void }) {
+function PatientRecordPage({ patient, onBack, onDeleted, onSaved }: { patient: Patient; onBack: () => void; onDeleted: () => void; onSaved: () => void }) {
   const [uploading, setUploading] = useState('');
   const [message, setMessage] = useState('');
   const [qrValue, setQrValue] = useState<string | null>(patient?.qrValue ?? null);
@@ -1028,14 +1043,16 @@ function PatientDialog({ patient, onOpenChange, onDeleted, onSaved }: { patient:
   }
 
   return (
-    <Dialog open={Boolean(patient)} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[94vh] max-w-5xl overflow-y-auto rounded-[1.75rem] p-6 sm:p-7">
-        <DialogHeader>
-          <DialogTitle className="text-2xl font-black">{patient?.name}</DialogTitle>
-          <DialogDescription>Evaluación, tratamiento, pagos, suplementos y evolución del paciente.</DialogDescription>
-        </DialogHeader>
-        {patient && (
-          <div className="mt-2 space-y-5">
+    <div className="space-y-5">
+      <div className="flex flex-col gap-4 rounded-3xl bg-slate-950 p-5 text-white sm:flex-row sm:items-center sm:justify-between sm:p-7">
+        <div>
+          <Button variant="ghost" onClick={onBack} className="-ml-3 mb-3 rounded-xl text-white/75 hover:bg-white/10 hover:text-white"><ArrowLeft /> Volver a pacientes</Button>
+          <h2 className="text-3xl font-black tracking-tight sm:text-4xl">{patient.name}</h2>
+          <p className="mt-2 text-white/60">Evaluación, tratamiento, pagos, suplementos y evolución.</p>
+        </div>
+        <span className="grid size-16 shrink-0 place-items-center rounded-2xl bg-cyan-300 text-xl font-black text-slate-950">{patient.name.split(' ').map((part) => part[0]).slice(0, 2).join('')}</span>
+      </div>
+      <div className="space-y-5 rounded-3xl bg-white p-5 shadow-sm sm:p-7">
             <div className="grid gap-3 sm:grid-cols-3">
               <div className="rounded-2xl bg-muted p-4"><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Sesiones</p><p className="mt-2 text-2xl font-black">{patient.used} / {patient.total}</p></div>
               <div className="rounded-2xl bg-cyan-50 p-4"><p className="text-xs font-semibold uppercase tracking-wider text-cyan-800">Teléfono</p><p className="mt-2 font-bold">{patient.phone || 'Sin registrar'}</p></div>
@@ -1125,10 +1142,8 @@ function PatientDialog({ patient, onOpenChange, onDeleted, onSaved }: { patient:
                 </AlertDialog>
               )}
             </div>
-          </div>
-        )}
-      </DialogContent>
-    </Dialog>
+      </div>
+    </div>
   );
 }
 
