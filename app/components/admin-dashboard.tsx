@@ -950,7 +950,6 @@ function PatientRecordPage({ patient, onBack, onDeleted, onSaved }: { patient: P
   const [deleting, setDeleting] = useState(false);
   const [weight, setWeight] = useState('');
   const [height, setHeight] = useState('');
-  const [targetWeight, setTargetWeight] = useState('');
 
   const loadRecord = useCallback(async () => {
     if (!patient || patient.id.startsWith('demo-')) return;
@@ -963,7 +962,6 @@ function PatientRecordPage({ patient, onBack, onDeleted, onSaved }: { patient: P
     setRecord(body);
     setWeight(body.assessment?.weightKg?.toString() ?? '');
     setHeight(body.assessment?.heightCm?.toString() ?? '');
-    setTargetWeight(body.assessment?.targetWeightKg?.toString() ?? '');
   }, [patient]);
 
   // oxlint-disable-next-line react-compiler/react-compiler -- load the selected patient's server record when the dialog opens
@@ -974,7 +972,8 @@ function PatientRecordPage({ patient, onBack, onDeleted, onSaved }: { patient: P
     : null;
   const healthyMin = Number(height) > 0 ? 18.5 * ((Number(height) / 100) ** 2) : null;
   const healthyMax = Number(height) > 0 ? 24.9 * ((Number(height) / 100) ** 2) : null;
-  const kilosToTarget = Number(weight) > 0 && Number(targetWeight) > 0 ? Math.max(0, Number(weight) - Number(targetWeight)) : null;
+  const automaticReferenceWeight = healthyMax && Number(weight) > healthyMax ? healthyMax : null;
+  const kilosToTarget = automaticReferenceWeight ? Number(weight) - automaticReferenceWeight : 0;
   const paidCents = record?.payments.reduce((sum, payment) => sum + payment.amountCents, 0) ?? 0;
   const totalCents = record?.plan?.totalAmountCents ?? 0;
 
@@ -1070,16 +1069,16 @@ function PatientRecordPage({ patient, onBack, onDeleted, onSaved }: { patient: P
                 <div className="grid gap-4 md:grid-cols-3">
                   <div className="space-y-2"><Label htmlFor="weightKg">Peso actual (kg)</Label><Input id="weightKg" name="weightKg" type="number" min="1" max="400" step="0.1" value={weight} onChange={(event) => setWeight(event.target.value)} className="h-11 rounded-xl" /></div>
                   <div className="space-y-2"><Label htmlFor="heightCm">Talla (cm)</Label><Input id="heightCm" name="heightCm" type="number" min="50" max="250" step="0.1" value={height} onChange={(event) => setHeight(event.target.value)} className="h-11 rounded-xl" /></div>
-                  <div className="space-y-2"><Label htmlFor="targetWeightKg">Peso meta acordado (kg)</Label><Input id="targetWeightKg" name="targetWeightKg" type="number" min="1" max="400" step="0.1" value={targetWeight} onChange={(event) => setTargetWeight(event.target.value)} className="h-11 rounded-xl" /></div>
+                  <div className="space-y-2"><Label htmlFor="targetWeightKg">Peso de referencia automático (kg)</Label><Input id="targetWeightKg" name="targetWeightKg" type="number" readOnly value={automaticReferenceWeight?.toFixed(1) ?? ''} placeholder="No corresponde bajar" className="h-11 rounded-xl bg-muted/60 font-bold" /></div>
                 </div>
                 {liveBmi && healthyMin && healthyMax && (
                   <div className="grid gap-3 rounded-2xl bg-slate-950 p-4 text-white sm:grid-cols-3">
                     <div><p className="text-xs text-white/60">IMC orientativo</p><p className="mt-1 text-2xl font-black">{liveBmi.toFixed(1)}</p></div>
                     <div><p className="text-xs text-white/60">Rango de referencia por IMC</p><p className="mt-1 font-bold">{healthyMin.toFixed(1)}–{healthyMax.toFixed(1)} kg</p></div>
-                    <div><p className="text-xs text-white/60">Diferencia hasta la meta</p><p className="mt-1 font-bold">{kilosToTarget !== null ? `${kilosToTarget.toFixed(1)} kg` : 'Sin meta'}</p></div>
+                    <div><p className="text-xs text-white/60">Kilos sobre el rango</p><p className="mt-1 font-bold">{kilosToTarget > 0 ? `${kilosToTarget.toFixed(1)} kg` : 'No corresponde bajar'}</p></div>
                   </div>
                 )}
-                <p className="text-xs leading-5 text-muted-foreground">El IMC es solo una referencia de tamizaje. La meta y las recomendaciones deben ser confirmadas por un profesional de salud considerando edad, composición corporal y antecedentes.</p>
+                <p className="text-xs leading-5 text-muted-foreground">Cálculo automático para adultos: 24.9 × talla². El IMC es solo una referencia de tamizaje; no se aplica igual a menores de 20 años, embarazo ni todos los tipos de composición corporal. La meta final debe confirmarla un profesional de salud.</p>
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2"><Label htmlFor="reason">Motivo de consulta</Label><Textarea id="reason" name="reason" defaultValue={record?.assessment?.reason} placeholder="Dolor, molestia, tiempo de evolución…" className="min-h-24 rounded-xl" /></div>
                   <div className="space-y-2"><Label htmlFor="conditions">Enfermedades y antecedentes declarados</Label><Textarea id="conditions" name="conditions" defaultValue={record?.assessment?.conditions} placeholder="Diagnósticos, operaciones, alergias, medicamentos…" className="min-h-24 rounded-xl" /></div>
